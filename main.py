@@ -1,30 +1,55 @@
-import requests
-from dotenv import load_dotenv
 import os
+from datetime import datetime, timedelta
+from notification_manager import NotificationManager
+from data_manager import DataManager
+from flight_search import FlightSearch
+from dotenv import load_dotenv
 
 load_dotenv()
 
-SHEETY_USERS_ENDPOINT = os.getenv('SHEETY_USERS_ENDPOINT')
-SHEETY_USERNAME = os.getenv('SHEETY_USERNAME')
-SHEETY_PASSWORD = os.getenv('SHEETY_PASSWORD')
+ORIGIN_CITY_IATA = os.getenv('ORIGIN_CITY_IATA')
 
-print("Welcome to Siddharth's Flight Club.")
-print("We find the best flight deals and email you.")
+data_manager = DataManager()
+flight_search = FlightSearch()
+notification_manager = NotificationManager()
 
-first_name = input("What is your first name?\n")
-last_name = input("What is your last name?\n")
-email = input("What is your email?\n")
+sheet_data = data_manager.get_destination_data()
 
-while input("Enter your email again.\n") != email:
-    print("Email ID don't match. Please check if you have entered your email correctly.")
+if sheet_data[0]["iataCode"] == "":
+    city_names = [row["city"] for row in sheet_data]
+    data_manager.city_codes = flight_search.get_destination_codes(city_names)
+    data_manager.update_destination_codes()
+    sheet_data = data_manager.get_destination_data()
 
-query = {
-    "user": {
-        "firstName": first_name,
-        "lastName": last_name,
-        "email": email
-    }
-}
+destinations = {
+    data["iataCode"]: {
+        "id": data["id"],
+        "city": data["city"],
+        "price": data["lowestPrice"]
+    } for data in sheet_data}
 
-response = requests.put(url=SHEETY_USERS_ENDPOINT, json=query, auth=(SHEETY_USERNAME, SHEETY_PASSWORD))
-print(response.text)
+tomorrow = datetime.now() + timedelta(days=1)
+six_month_from_today = datetime.now() + timedelta(days=(6 * 30))
+
+for destination_code in destinations:
+    flight = flight_search.check_flights(
+        ORIGIN_CITY_IATA,
+        destination_code,
+        from_time=tomorrow,
+        to_time=six_month_from_today
+    )
+
+    if flight is None:
+        continue
+    if flight.price < destinations[destination_code]["price"]:
+        users = data_manager.get_customer_emails()
+        emails = [row["email"] for row in users]
+        names = [row["firstName"] for row in users]
+
+        message = f"Low price alert! Only ₹{flight.price} to fly from {flight.origin_city}-{flight.origin_airport} to {flight.destination_city}-{flight.destination_airport}, from {flight.out_date} to {flight.return_date}."
+        if flight.stop_overs > 0:
+            message += f"\nFlight has {flight.stop_overs} stop over, via {flight.via_city}."
+            link = f"https://www.google.co.uk/flights?hl=en#flt={flight.origin_airport}.{flight.destination_airport}.{flight.out_date}*{flight.destination_airport}.{flight.origin_airport}.{flight.return_date}"
+
+            notification_manager.send_emails(emails, message, link)
+            notification_manager.send_sms(message)
